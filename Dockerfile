@@ -12,7 +12,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir --break-system-packages \
     flask \
     apscheduler \
-    gallery-dl
+    gallery-dl \
+    yt-dlp
 
 # Create necessary directories
 RUN mkdir -p /app/data /media /app/templates /app/static
