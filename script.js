@@ -8,11 +8,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const clearCompletedBtn = document.getElementById('clear-completed-button');
   const clearAllBtn       = document.getElementById('clear-all-button');
   const exportQueueBtn    = document.getElementById('export-queue-button');
+  const pauseResumeBtn    = document.getElementById('pause-resume-button');
   const concurrentInput   = document.getElementById('concurrent-sites');
   const urlInput          = document.getElementById('url-input');
   const queueList         = document.getElementById('queue-list');
   const updateGalleryDlBtn = document.getElementById('update-gallery-dl');
   const updateStatus      = document.getElementById('update-status');
+  const updateYtDlpBtn    = document.getElementById('update-yt-dlp');
+  const ytDlpUpdateStatus = document.getElementById('yt-dlp-update-status');
+  
+  let isPaused = false;
 
   // Config modal elements
   const openConfigBtn     = document.getElementById('open-config-btn');
@@ -26,6 +31,23 @@ document.addEventListener('DOMContentLoaded', () => {
   const siteConfigs       = document.getElementById('site-configs');
   const saveConfigBtn     = document.getElementById('save-config-btn');
   const configStatus      = document.getElementById('config-status');
+
+  // Fetch and display current versions on page load
+  async function loadVersions() {
+    try {
+      const resp = await fetch('/versions');
+      const data = await resp.json();
+      
+      if (data['gallery-dl']) {
+        updateGalleryDlBtn.textContent = `Update gallery-dl (v${data['gallery-dl']})`;
+      }
+      if (data['yt-dlp']) {
+        updateYtDlpBtn.textContent = `Update yt-dlp (v${data['yt-dlp']})`;
+      }
+    } catch (err) {
+      console.error('Failed to load versions:', err);
+    }
+  }
 
   // Polling intervals
   const ACTIVE_POLL_INTERVAL = 3000;
@@ -67,6 +89,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const activeStatuses = ['pending', 'queued', 'active'];
       hasActiveItems = data.downloads.some(d => activeStatuses.includes(d.status));
+      
+      // Update paused state
+      isPaused = data.paused || false;
+      updatePauseResumeButton();
 
       data.downloads.forEach(d => {
         const li = document.createElement('li');
@@ -87,11 +113,48 @@ document.addEventListener('DOMContentLoaded', () => {
         urlSpan.title = d.url;
         content.appendChild(urlSpan);
 
+        // Show failure reason if failed
+        let statusText = d.status;
+        if (d.status === 'failed' && d.completed_time) {
+          statusText = `failed : ${d.completed_time}`;
+        }
+        
         const statusSpan = document.createElement('span');
         statusSpan.className = `queue-status-text status-text-${d.status}`;
-        statusSpan.textContent = d.status;
+        statusSpan.textContent = statusText;
         content.appendChild(statusSpan);
 
+        // Add action buttons column
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'task-actions';
+        
+        // Bump button (only for pending/failed)
+        if (d.status === 'pending' || d.status === 'failed') {
+          const bumpBtn = document.createElement('button');
+          bumpBtn.className = 'action-btn bump-btn';
+          bumpBtn.title = 'Bump to Top';
+          bumpBtn.textContent = '⬆️';
+          bumpBtn.onclick = (e) => { e.stopPropagation(); bumpTask(d.id); };
+          actionsDiv.appendChild(bumpBtn);
+        }
+        
+        // Delete button
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'action-btn delete-btn';
+        deleteBtn.title = 'Delete Task';
+        deleteBtn.textContent = '🔴';
+        deleteBtn.onclick = (e) => { e.stopPropagation(); deleteTask(d.id); };
+        actionsDiv.appendChild(deleteBtn);
+        
+        // Copy button
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'action-btn copy-btn';
+        copyBtn.title = 'Copy URL';
+        copyBtn.textContent = '📋';
+        copyBtn.onclick = (e) => { e.stopPropagation(); copyUrl(d.url); };
+        actionsDiv.appendChild(copyBtn);
+        
+        li.appendChild(actionsDiv);
         li.appendChild(content);
         queueList.appendChild(li);
       });
@@ -99,6 +162,16 @@ document.addEventListener('DOMContentLoaded', () => {
       updatePollingInterval();
     } catch (err) {
       console.error('Failed to refresh status:', err);
+    }
+  }
+  
+  function updatePauseResumeButton() {
+    if (isPaused) {
+      pauseResumeBtn.textContent = 'Resume Queue';
+      pauseResumeBtn.classList.add('warning');
+    } else {
+      pauseResumeBtn.textContent = 'Pause Queue';
+      pauseResumeBtn.classList.remove('warning');
     }
   }
 
@@ -152,6 +225,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   };
 
+  // Pause/Resume queue handler
+  pauseResumeBtn.addEventListener('click', async () => {
+    try {
+      const resp = await fetch('/toggle-pause', { method: 'POST' });
+      const data = await resp.json();
+      isPaused = data.paused;
+      updatePauseResumeButton();
+    } catch (err) {
+      console.error('Failed to toggle pause:', err);
+    }
+  });
+
   exportQueueBtn.onclick = () => {
     window.location = '/export-queue';
   };
@@ -191,10 +276,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Update yt-dlp button
+  updateYtDlpBtn.addEventListener('click', async () => {
+    updateYtDlpBtn.disabled = true;
+    ytDlpUpdateStatus.textContent = 'Updating...';
+    ytDlpUpdateStatus.className = '';
+
+    try {
+      const resp = await fetch('/update-yt-dlp', { method: 'POST' });
+      const data = await resp.json();
+
+      if (data.success) {
+        ytDlpUpdateStatus.textContent = `Updated to v${data.version}`;
+        ytDlpUpdateStatus.className = 'update-success';
+      } else {
+        ytDlpUpdateStatus.textContent = 'Update failed';
+        ytDlpUpdateStatus.className = 'update-error';
+        console.error('Update output:', data.output);
+      }
+    } catch (err) {
+      ytDlpUpdateStatus.textContent = 'Update failed';
+      ytDlpUpdateStatus.className = 'update-error';
+      console.error('Failed to update yt-dlp:', err);
+    } finally {
+      updateYtDlpBtn.disabled = false;
+    }
+  });
+
   // Click failed item to re-queue
   queueList.addEventListener('click', async (e) => {
     const li = e.target.closest('li');
     if (li && li.dataset.status === 'failed') {
+      // Don't requeue if clicking on action buttons
+      if (e.target.closest('.task-actions')) return;
+      
       try {
         const resp = await fetch(`/queue/${li.dataset.id}`, { method: 'POST' });
         const data = await resp.json();
@@ -206,6 +321,44 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
   });
+  
+  // Bump task to top of queue
+  async function bumpTask(id) {
+    try {
+      const resp = await fetch(`/queue/${id}/bump`, { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) {
+        refreshStatus();
+      }
+    } catch (err) {
+      console.error('Failed to bump task:', err);
+    }
+  }
+  
+  // Delete task from queue
+  async function deleteTask(id) {
+    if (!confirm('Delete this task from the queue?')) return;
+    
+    try {
+      const resp = await fetch(`/queue/${id}/delete`, { method: 'POST' });
+      const data = await resp.json();
+      if (data.success) {
+        refreshStatus();
+      }
+    } catch (err) {
+      console.error('Failed to delete task:', err);
+    }
+  }
+  
+  // Copy URL to clipboard
+  function copyUrl(url) {
+    navigator.clipboard.writeText(url).then(() => {
+      // Optional: show a brief toast notification
+      console.log('URL copied to clipboard');
+    }).catch(err => {
+      console.error('Failed to copy URL:', err);
+    });
+  }
 
   // =====================
   // Config Modal Logic
@@ -430,5 +583,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Initial load
+  loadVersions();
   refreshStatus();
 });

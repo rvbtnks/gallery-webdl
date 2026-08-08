@@ -99,6 +99,13 @@ c.execute('''
         completed_time TIMESTAMP
     )
 ''')
+# Add paused_state table if not exists
+c.execute('''
+    CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+''')
 conn.commit()
 conn.close()
 checkpoint_database()
@@ -159,27 +166,72 @@ def run_gallery_dl(download_id, site, url):
         )
 
         output_dir = '/media'
-        cmd = ['gallery-dl', url, '-d', output_dir]
+        cmd = ['gallery-dl', '-v', url, '-d', output_dir]
         if os.path.exists(CONFIG_PATH):
             cmd.extend(['-c', CONFIG_PATH])
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        # Stream output to stdout in real-time and capture for analysis
+        output_lines = []
+        for line in process.stdout:
+            line_clean = line.rstrip()
+            output_lines.append(line_clean)
+            print(f"[gallery-dl][{site}] {line_clean}", flush=True)
+        
+        process.stdout.close()
+        returncode = process.wait()
 
-        status = 'completed' if process.returncode == 0 else 'failed'
+        # Analyze output for silent failures
+        output_text = '\n'.join(output_lines)
+        failure_reason = None
+        
+        # Check for common failure patterns even with exit code 0
+        if returncode == 0:
+            if 'downloaded 0' in output_text.lower() or 'no suitable entries' in output_text.lower():
+                failure_reason = 'no files downloaded'
+            elif '403' in output_text or 'forbidden' in output_text.lower():
+                failure_reason = '403 forbidden'
+            elif '404' in output_text or 'not found' in output_text.lower():
+                failure_reason = '404 not found'
+            elif 'login failed' in output_text.lower() or 'authentication' in output_text.lower():
+                failure_reason = 'login failed'
+            elif 'rate limit' in output_text.lower() or 'too many requests' in output_text.lower():
+                failure_reason = 'rate limited'
+        
+        # Determine final status
+        if returncode != 0:
+            status = 'failed'
+            if not failure_reason:
+                failure_reason = f'exit code {returncode}'
+        elif failure_reason:
+            status = 'failed'
+        else:
+            status = 'completed'
+        
         if status == 'failed':
-            print(f"Download failed for {url}. Error: {stderr.decode('utf-8')}")
+            print(f"[gallery-dl][{site}] Download failed: {failure_reason}")
 
+        # Store failure reason in completed_time field (repurposed for error message)
+        completed_value = datetime.now().isoformat() if status == 'completed' else failure_reason
+        
         execute_db_query(
             'UPDATE downloads SET status = ?, completed_time = ? WHERE id = ?',
-            (status, datetime.now().isoformat(), download_id)
+            (status, completed_value if status == 'failed' else datetime.now().isoformat(), download_id)
         )
 
     except Exception as e:
-        print(f"Exception in run_gallery_dl for {url}: {e}")
+        print(f"[gallery-dl][{site}] Exception: {e}")
         try:
             execute_db_query(
                 'UPDATE downloads SET status = ?, completed_time = ? WHERE id = ?',
-                ('failed', datetime.now().isoformat(), download_id)
+                ('failed', str(e), download_id)
             )
         except:
             pass
@@ -190,6 +242,14 @@ def run_gallery_dl(download_id, site, url):
 def process_queue():
     """Start downloads for pending items, one per site, up to concurrency limit."""
     try:
+        # Check if queue is paused
+        paused = execute_db_query(
+            "SELECT value FROM app_state WHERE key = 'paused'",
+            fetch=True
+        )
+        if paused and paused[0][0] == '1':
+            return
+        
         # Get sites that are currently active
         active_rows = execute_db_query(
             "SELECT DISTINCT site FROM downloads WHERE status = 'active'",
@@ -271,9 +331,18 @@ def status():
         }
         for r in rows
     ]
+    
+    # Get paused state
+    paused_row = execute_db_query(
+        "SELECT value FROM app_state WHERE key = 'paused'",
+        fetch=True
+    )
+    is_paused = paused_row and paused_row[0][0] == '1'
+    
     return jsonify({
         'downloads': downloads,
-        'concurrency': settings.get('concurrency', 3)
+        'concurrency': settings.get('concurrency', 3),
+        'paused': is_paused
     })
 
 @app.route('/clear-completed', methods=['POST'])
@@ -326,6 +395,40 @@ def requeue(download_id):
     return jsonify({'success': True, 'id': download_id})
 
 
+@app.route('/queue/<int:download_id>/bump', methods=['POST'])
+def bump_task(download_id):
+    """Move a task to the top of the queue by updating its timestamp"""
+    execute_db_query(
+        'UPDATE downloads SET added_time = ? WHERE id = ?',
+        (datetime.now().isoformat(), download_id)
+    )
+    return jsonify({'success': True, 'id': download_id})
+
+
+@app.route('/queue/<int:download_id>/delete', methods=['POST'])
+def delete_task(download_id):
+    """Delete a task from the queue"""
+    execute_db_query('DELETE FROM downloads WHERE id = ?', (download_id,))
+    return jsonify({'success': True, 'id': download_id})
+
+
+@app.route('/toggle-pause', methods=['POST'])
+def toggle_pause():
+    """Toggle the paused state of the queue"""
+    current = execute_db_query(
+        "SELECT value FROM app_state WHERE key = 'paused'",
+        fetch=True
+    )
+    is_paused = current and current[0][0] == '1'
+    
+    new_value = '0' if is_paused else '1'
+    execute_db_query(
+        "INSERT OR REPLACE INTO app_state (key, value) VALUES ('paused', ?)",
+        (new_value,)
+    )
+    return jsonify({'paused': not is_paused})
+
+
 @app.route('/update-gallery-dl', methods=['POST'])
 def update_gallery_dl():
     """Update gallery-dl via pip"""
@@ -339,6 +442,35 @@ def update_gallery_dl():
         
         # Get current version after update
         version_cmd = ['gallery-dl', '--version']
+        version_process = subprocess.Popen(version_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        version_out, _ = version_process.communicate()
+        version = version_out.decode('utf-8').strip() if version_process.returncode == 0 else 'unknown'
+        
+        return jsonify({
+            'success': success,
+            'output': output,
+            'version': version
+        })
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return jsonify({'success': False, 'output': 'Update timed out', 'version': 'unknown'})
+    except Exception as e:
+        return jsonify({'success': False, 'output': str(e), 'version': 'unknown'})
+
+
+@app.route('/update-yt-dlp', methods=['POST'])
+def update_yt_dlp():
+    """Update yt-dlp via pip"""
+    try:
+        cmd = ['pip', 'install', '--upgrade', 'yt-dlp', '--break-system-packages']
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate(timeout=120)
+        
+        output = stdout.decode('utf-8') + stderr.decode('utf-8')
+        success = process.returncode == 0
+        
+        # Get current version after update
+        version_cmd = ['yt-dlp', '--version']
         version_process = subprocess.Popen(version_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         version_out, _ = version_process.communicate()
         version = version_out.decode('utf-8').strip() if version_process.returncode == 0 else 'unknown'
@@ -377,6 +509,30 @@ def update_config():
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/versions', methods=['GET'])
+def get_versions():
+    """Get current versions of gallery-dl and yt-dlp"""
+    versions = {}
+    
+    # Get gallery-dl version
+    try:
+        process = subprocess.Popen(['gallery-dl', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, _ = process.communicate(timeout=10)
+        versions['gallery-dl'] = stdout.decode('utf-8').strip() if process.returncode == 0 else 'unknown'
+    except Exception as e:
+        versions['gallery-dl'] = 'unknown'
+    
+    # Get yt-dlp version
+    try:
+        process = subprocess.Popen(['yt-dlp', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, _ = process.communicate(timeout=10)
+        versions['yt-dlp'] = stdout.decode('utf-8').strip() if process.returncode == 0 else 'unknown'
+    except Exception as e:
+        versions['yt-dlp'] = 'unknown'
+    
+    return jsonify(versions)
 
 
 @app.route('/config/sites', methods=['GET'])

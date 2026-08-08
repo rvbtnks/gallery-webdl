@@ -99,6 +99,7 @@ body {
 .menu-header h2 {
     margin: 0;
     color: var(--text);
+    padding-left: 40px;
 }
 
 .close-menu-btn {
@@ -256,6 +257,42 @@ textarea:focus {
     padding: 12px 15px;
     border-bottom: 1px solid var(--border-light);
     transition: background-color 0.2s;
+    gap: 12px;
+}
+
+.task-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.action-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 4px;
+    opacity: 0.6;
+    transition: opacity 0.2s, transform 0.1s;
+    line-height: 1;
+}
+
+.action-btn:hover {
+    opacity: 1;
+    transform: scale(1.15);
+}
+
+.delete-btn:hover {
+    color: #ff4444;
+}
+
+.bump-btn:hover {
+    color: var(--primary);
+}
+
+.copy-btn:hover {
+    color: var(--success);
 }
 
 .queue-item:last-child {
