@@ -23,7 +23,6 @@ A lightweight web interface for managing gallery-dl and yt-dlp download queues w
 Create a `docker-compose.yml` file:
 
 ```yaml
-version: '3'
 services:
   gallery-dl-webui:
     build:
