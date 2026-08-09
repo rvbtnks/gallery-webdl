@@ -1,95 +1,48 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>gallery-dl Web UI</title>
-  <link rel="stylesheet" href="/static/style.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gallery-DL WebUI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <button id="menu-toggle" aria-label="Open menu">☰</button>
-  <aside id="sidebar" class="closed">
-    <div class="menu-header">
-      <h2>Settings</h2>
-      <button class="close-menu-btn">✕</button>
-    </div>
-    <div class="menu-item">
-      <label><input type="checkbox" id="dark-mode-toggle" /> Dark Mode</label>
-    </div>
-    <div class="menu-item">
-      <label for="concurrent-sites">Concurrent Sites:</label>
-      <input type="number" id="concurrent-sites" min="1" max="10" value="3" />
-    </div>
-    <div class="menu-item">
-      <button id="open-config-btn" class="btn secondary">Configure gallery-dl</button>
-    </div>
-    <div class="menu-item">
-      <button id="update-gallery-dl" class="btn primary">Update gallery-dl</button>
-      <span id="update-status"></span>
-    </div>
-    <div class="menu-item">
-      <button id="update-yt-dlp" class="btn primary">Update yt-dlp</button>
-      <span id="yt-dlp-update-status"></span>
-    </div>
-  </aside>
+    <div class="container">
+        <nav class="sidebar" id="sidebar">
+            <button class="toggle-btn" id="toggleSidebar">☰</button>
+            
+            <!-- Settings Header moved right with padding -->
+            <h2 class="settings-header">Settings</h2>
+            
+            <div class="sidebar-content">
+                <div class="update-section">
+                    <button id="updateGalleryDl">Update gallery-dl (<span id="gd-version">...</span>)</button>
+                    <span id="gd-status" class="status-msg"></span>
+                    
+                    <button id="updateYtDlp" style="margin-top: 10px;">Update yt-dlp (<span id="yt-version">...</span>)</button>
+                    <span id="yt-status" class="status-msg"></span>
+                </div>
 
-  <!-- Config Modal -->
-  <div id="config-modal" class="modal">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h2>gallery-dl Configuration</h2>
-        <button class="modal-close-btn">✕</button>
-      </div>
-      <div class="modal-tabs">
-        <button class="tab-btn active" data-tab="global">Global</button>
-        <button class="tab-btn" data-tab="sites">Sites</button>
-      </div>
-      <div class="modal-body">
-        <!-- Global Tab -->
-        <div id="tab-global" class="tab-content active">
-          <div class="config-section">
-            <h3>Extractor Settings</h3>
-            <p class="config-hint">Base settings for all extractors (base-directory, filename patterns, etc.)</p>
-            <textarea id="config-extractor" class="config-editor" spellcheck="false"></textarea>
-          </div>
-          <div class="config-section">
-            <h3>Downloader Settings</h3>
-            <p class="config-hint">Download behavior (retries, timeout, rate limits, etc.)</p>
-            <textarea id="config-downloader" class="config-editor" spellcheck="false"></textarea>
-          </div>
-        </div>
-        <!-- Sites Tab -->
-        <div id="tab-sites" class="tab-content">
-          <div class="site-selector">
-            <select id="site-dropdown">
-              <option value="">Select a site...</option>
-            </select>
-            <button id="add-site-btn" class="btn primary">Add Site</button>
-          </div>
-          <div id="site-configs"></div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <span id="config-status"></span>
-        <button id="save-config-btn" class="btn primary">Save Config</button>
-      </div>
-    </div>
-  </div>
+                <div class="queue-control">
+                    <button id="pauseBtn">Pause Queue</button>
+                </div>
+            </div>
+        </nav>
 
-  <main>
-    <h1>gallery-dl Queue</h1>
-    <textarea id="url-input" placeholder="Enter one URL per line..."></textarea>
-    <div class="controls">
-      <button id="add-urls-button" class="btn primary">Add URLs</button>
-      <button id="refresh-button" class="btn secondary">Refresh Status</button>
-      <button id="clear-completed-button" class="btn warning">Clear Completed</button>
-      <button id="clear-all-button" class="btn danger">Clear All</button>
-      <button id="pause-resume-button" class="btn secondary">Pause Queue</button>
-      <button id="export-queue-button" class="btn secondary" style="margin-left:auto;">Export Queue</button>
-    </div>
-    <ul id="queue-list"></ul>
-  </main>
+        <main class="main-content">
+            <h1>Download Queue</h1>
+            
+            <div class="input-group">
+                <input type="text" id="urlInput" placeholder="Paste URL here...">
+                <button id="addBtn">Add to Queue</button>
+            </div>
 
-  <script src="/static/script.js"></script>
+            <div class="task-list" id="taskList">
+                <!-- Tasks injected here -->
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
