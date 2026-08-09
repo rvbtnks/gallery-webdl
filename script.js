@@ -17,6 +17,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const closeMenuBtn = document.querySelector('.close-menu-btn');
     const darkModeToggle = document.getElementById('dark-mode-toggle');
     const concurrentSitesInput = document.getElementById('concurrent-sites');
+    
+    // Load and set concurrent sites value from environment/config
+    fetch('/api/settings/concurrent', { method: 'GET' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.value) {
+                concurrentSitesInput.value = data.value;
+            }
+        })
+        .catch(() => {});
+    
+    // Update concurrent sites when changed
+    concurrentSitesInput.addEventListener('change', () => {
+        const value = parseInt(concurrentSitesInput.value, 10);
+        if (value >= 1 && value <= 10) {
+            fetch('/api/settings/concurrent', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: value })
+            });
+        }
+    });
+    
     const openConfigBtn = document.getElementById('open-config-btn');
     const updateGalleryDlBtn = document.getElementById('update-gallery-dl');
     const updateStatus = document.getElementById('update-status');
@@ -202,7 +225,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         // Send pause/resume state to backend
-        fetch('/api/pause', {
+        fetch('/api/settings/pause', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paused: isPaused })
