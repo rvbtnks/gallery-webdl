@@ -24,6 +24,12 @@ def get_db():
         g.db.row_factory = sqlite3.Row
     return g.db
 
+def get_db_connection():
+    """Create a new database connection for use outside app context"""
+    conn = sqlite3.connect(app.config['DATABASE'])
+    conn.row_factory = sqlite3.Row
+    return conn
+
 @app.teardown_appcontext
 def close_db(exception):
     db = g.pop('db', None)
@@ -56,8 +62,8 @@ def init_db():
 def run_gallery_dl(task_id, url):
     global queue_paused
     
-    # Update status to active
-    db = get_db()
+    # Use direct connection for background thread
+    db = get_db_connection()
     db.execute('UPDATE tasks SET status = ?, started_at = ?, fail_reason = NULL WHERE id = ?',
                ('active', datetime.now(), task_id))
     db.commit()
@@ -95,7 +101,6 @@ def run_gallery_dl(task_id, url):
             # For now, we rely on the user seeing the logs, but we can flag common errors if captured
             pass
 
-        db = get_db()
         if fail_reason:
             db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
                        ('failed', datetime.now(), fail_reason, task_id))
@@ -105,11 +110,11 @@ def run_gallery_dl(task_id, url):
         db.commit()
 
     except Exception as e:
-        db = get_db()
         db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
                    ('failed', datetime.now(), str(e), task_id))
         db.commit()
     finally:
+        db.close()
         # Trigger next task check
         threading.Thread(target=process_queue).start()
 
@@ -118,7 +123,8 @@ def process_queue():
     if queue_paused:
         return
 
-    db = get_db()
+    # Use direct connection for background scheduler
+    db = get_db_connection()
     # Get pending tasks ordered by created_at (bumped items have newer created_at)
     tasks = db.execute(
         "SELECT * FROM tasks WHERE status = 'pending' ORDER BY created_at DESC"
@@ -133,6 +139,8 @@ def process_queue():
     if slots_available > 0 and tasks:
         for task in tasks[:slots_available]:
             threading.Thread(target=run_gallery_dl, args=(task['id'], task['url'])).start()
+    
+    db.close()
 
 @app.route('/')
 def index():
@@ -140,11 +148,13 @@ def index():
 
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
-    db = get_db()
+    db = get_db_connection()
     tasks = db.execute(
         "SELECT * FROM tasks ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, created_at DESC"
     ).fetchall()
-    return jsonify([dict(row) for row in tasks])
+    result = [dict(row) for row in tasks]
+    db.close()
+    return jsonify(result)
 
 @app.route('/api/tasks', methods=['POST'])
 def add_task():
@@ -153,16 +163,18 @@ def add_task():
     if not url:
         return jsonify({'error': 'URL required'}), 400
     
-    db = get_db()
+    db = get_db_connection()
     db.execute('INSERT INTO tasks (url) VALUES (?)', (url,))
     db.commit()
+    db.close()
     
     threading.Thread(target=process_queue).start()
     return jsonify({'success': True}), 201
 
 @app.route('/api/task/<int:task_id>/restart', methods=['POST'])
 def restart_task(task_id):
-    db = get_db()
+    # Use direct connection for API endpoint
+    db = get_db_connection()
     # CRITICAL FIX: Reset fail_reason to NULL and status to pending
     db.execute('''
         UPDATE tasks 
@@ -174,13 +186,14 @@ def restart_task(task_id):
         WHERE id = ?
     ''', (task_id,))
     db.commit()
+    db.close()
     
     threading.Thread(target=process_queue).start()
     return jsonify({'success': True})
 
 @app.route('/api/task/<int:task_id>/bump', methods=['POST'])
 def bump_task(task_id):
-    db = get_db()
+    db = get_db_connection()
     # Update created_at to NOW() so it sorts to the top of pending list
     db.execute('''
         UPDATE tasks 
@@ -188,13 +201,15 @@ def bump_task(task_id):
         WHERE id = ? AND status = 'pending'
     ''', (task_id,))
     db.commit()
+    db.close()
     return jsonify({'success': True})
 
 @app.route('/api/task/<int:task_id>/delete', methods=['POST'])
 def delete_task(task_id):
-    db = get_db()
+    db = get_db_connection()
     db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
     db.commit()
+    db.close()
     return jsonify({'success': True})
 
 @app.route('/api/settings/pause', methods=['POST'])
