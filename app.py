@@ -4,6 +4,7 @@ import subprocess
 import threading
 import time
 import re
+import json
 from flask import Flask, render_template, request, jsonify, g
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
@@ -12,6 +13,7 @@ app = Flask(__name__)
 app.config['DATABASE'] = '/app/data/gallery_dl.db'
 app.config['MEDIA_DIR'] = '/media'
 app.config['MAX_CONCURRENT'] = int(os.environ.get('MAX_CONCURRENT', 2))
+app.config['CONFIG_FILE'] = '/app/data/config.json'
 
 # Global state for pausing
 queue_paused = False
@@ -246,6 +248,44 @@ def get_versions():
         yt_ver = "unknown"
         
     return jsonify({'gallery_dl': gd_ver, 'yt_dlp': yt_ver})
+
+@app.route('/api/config', methods=['GET'])
+def get_config():
+    try:
+        if os.path.exists(app.config['CONFIG_FILE']):
+            with open(app.config['CONFIG_FILE'], 'r') as f:
+                config = json.load(f)
+            return jsonify(config)
+    except Exception as e:
+        print(f"Error loading config: {e}")
+    return jsonify({'extractor': {}, 'downloader': {}, 'site': {}})
+
+@app.route('/api/config', methods=['POST'])
+def save_config():
+    try:
+        data = request.json
+        config = {
+            'extractor': data.get('extractor', {}),
+            'downloader': data.get('downloader', {}),
+            'site': data.get('site', {})
+        }
+        
+        os.makedirs(os.path.dirname(app.config['CONFIG_FILE']), exist_ok=True)
+        with open(app.config['CONFIG_FILE'], 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/extractors', methods=['GET'])
+def get_extractors():
+    try:
+        result = subprocess.run(['gallery-dl', '--list-extractors'], capture_output=True, text=True)
+        extractors = [line.strip() for line in result.stdout.split('\n') if line.strip() and not line.startswith('#')]
+        return jsonify(extractors)
+    except:
+        return jsonify([])
 
 if __name__ == '__main__':
     init_db()
