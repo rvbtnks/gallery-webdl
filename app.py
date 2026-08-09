@@ -13,7 +13,7 @@ app = Flask(__name__)
 app.config['DATABASE'] = '/app/data/gallery_dl.db'
 app.config['MEDIA_DIR'] = '/media'
 app.config['MAX_CONCURRENT'] = int(os.environ.get('MAX_CONCURRENT', 2))
-app.config['CONFIG_FILE'] = '/app/data/config.json'
+app.config['CONFIG_FILE'] = '/app/data/gallery-dl.json'
 
 # Global state for pausing
 queue_paused = False
@@ -63,7 +63,7 @@ def run_gallery_dl(task_id, url):
 
     # Prepare command with verbose output for live logging
     # Using -o to define output path dynamically based on site could be added here
-    cmd = ['gallery-dl', '-v', '--no-part', url]
+    cmd = ['gallery-dl', '-v', '--no-part', '-c', app.config['CONFIG_FILE'], url]
     
     try:
         # Start process with merged stdout/stderr for live logging
