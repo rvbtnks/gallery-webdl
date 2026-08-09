@@ -3,558 +3,258 @@ import sqlite3
 import subprocess
 import threading
 import time
-import json
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify
+import re
+from flask import Flask, render_template, request, jsonify, g
 from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime
 
-# Paths
-DATA_DIR = '/app/data'
-TEMPLATES_DIR = '/app/templates'
-STATIC_DIR = '/app/static'
-DB_PATH = os.path.join(DATA_DIR, 'gallery_dl_queue.db')
-SETTINGS_PATH = os.path.join(DATA_DIR, 'settings.json')
-CONFIG_PATH = os.path.join(DATA_DIR, 'gallery-dl.json')
+app = Flask(__name__)
+app.config['DATABASE'] = '/app/data/gallery_dl.db'
+app.config['MEDIA_DIR'] = '/media'
+app.config['MAX_CONCURRENT'] = int(os.environ.get('MAX_CONCURRENT', 2))
 
-os.makedirs(DATA_DIR, exist_ok=True)
+# Global state for pausing
+queue_paused = False
 
-# Thread-local storage for database connections
-thread_local = threading.local()
+def get_db():
+    if 'db' not in g:
+        g.db = sqlite3.connect(app.config['DATABASE'])
+        g.db.row_factory = sqlite3.Row
+    return g.db
 
-def get_db_connection():
-    """Get a thread-local database connection"""
-    if not hasattr(thread_local, 'connection'):
-        thread_local.connection = sqlite3.connect(
-            DB_PATH,
-            timeout=30.0,
-            check_same_thread=False
-        )
-        thread_local.connection.execute('PRAGMA journal_mode=WAL')
-        thread_local.connection.execute('PRAGMA synchronous=NORMAL')
-        thread_local.connection.execute('PRAGMA cache_size=1000')
-        thread_local.connection.execute('PRAGMA wal_autocheckpoint=1000')
-    return thread_local.connection
+@app.teardown_appcontext
+def close_db(exception):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
-def close_db_connection():
-    """Close thread-local database connection"""
-    if hasattr(thread_local, 'connection'):
-        thread_local.connection.close()
-        delattr(thread_local, 'connection')
+def init_db():
+    with app.app_context():
+        db = get_db()
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                fail_reason TEXT
+            )
+        ''')
+        # Ensure paused state table exists
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        db.commit()
 
-def execute_db_query(query, params=(), fetch=False):
-    """Execute database query with retry logic for locked DB"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(query, params)
-            
-            if fetch:
-                return cur.fetchall()
-            else:
-                conn.commit()
-                return cur.lastrowid if cur.lastrowid else None
-                
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < max_retries - 1:
-                print(f"Database locked, retrying... (attempt {attempt + 1})")
-                time.sleep(0.1 * (attempt + 1))
-                continue
-            else:
-                print(f"Database error: {e}")
-                raise
+def run_gallery_dl(task_id, url):
+    global queue_paused
+    
+    # Update status to active
+    db = get_db()
+    db.execute('UPDATE tasks SET status = ?, started_at = ?, fail_reason = NULL WHERE id = ?',
+               ('active', datetime.now(), task_id))
+    db.commit()
 
-def checkpoint_database():
-    """Force a WAL checkpoint"""
+    # Prepare command with verbose output for live logging
+    # Using -o to define output path dynamically based on site could be added here
+    cmd = ['gallery-dl', '-v', '--no-part', url]
+    
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        conn.close()
-    except Exception as e:
-        print(f"Error during checkpoint: {e}")
-
-def extract_site(url):
-    """Extract main domain from URL (e.g., 'twitter' from 'https://www.twitter.com/...')"""
-    host = url.split('://')[-1].split('/')[0]
-    if host.startswith('www.'):
-        host = host[4:]
-    parts = host.split('.')
-    if len(parts) >= 2:
-        return parts[-2]
-    return parts[0]
-
-# Initialize database
-conn = sqlite3.connect(DB_PATH)
-conn.execute('PRAGMA journal_mode=WAL')
-conn.execute('PRAGMA synchronous=NORMAL')
-c = conn.cursor()
-c.execute('''
-    CREATE TABLE IF NOT EXISTS downloads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        url TEXT NOT NULL,
-        site TEXT NOT NULL,
-        status TEXT DEFAULT 'pending',
-        added_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_time TIMESTAMP
-    )
-''')
-# Add paused_state table if not exists
-c.execute('''
-    CREATE TABLE IF NOT EXISTS app_state (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )
-''')
-conn.commit()
-conn.close()
-checkpoint_database()
-
-# Load or create settings
-if os.path.exists(SETTINGS_PATH):
-    with open(SETTINGS_PATH) as f:
-        settings = json.load(f)
-else:
-    settings = {'concurrency': 3}
-    with open(SETTINGS_PATH, 'w') as f:
-        json.dump(settings, f)
-
-def save_settings():
-    with open(SETTINGS_PATH, 'w') as f:
-        json.dump(settings, f)
-
-
-def get_default_config():
-    """Return default config structure"""
-    return {
-        "extractor": {
-            "base-directory": "/media"
-        },
-        "downloader": {
-            "retries": 3,
-            "timeout": 30
-        }
-    }
-
-
-def load_config():
-    """Load config from file or return default"""
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return get_default_config()
-    return get_default_config()
-
-
-def save_config(config):
-    """Save config to file"""
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(config, f, indent=2)
-
-# Flask app
-app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=STATIC_DIR)
-
-
-def run_gallery_dl(download_id, site, url):
-    """Run gallery-dl command for a specific URL"""
-    try:
-        execute_db_query(
-            'UPDATE downloads SET status = ? WHERE id = ?',
-            ('active', download_id)
-        )
-
-        output_dir = '/media'
-        cmd = ['gallery-dl', '-v', url, '-d', output_dir]
-        if os.path.exists(CONFIG_PATH):
-            cmd.extend(['-c', CONFIG_PATH])
-        
+        # Start process with merged stdout/stderr for live logging
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            universal_newlines=True
         )
-        
-        # Stream output to stdout in real-time and capture for analysis
-        output_lines = []
-        for line in process.stdout:
-            line_clean = line.rstrip()
-            output_lines.append(line_clean)
-            print(f"[gallery-dl][{site}] {line_clean}", flush=True)
-        
-        process.stdout.close()
-        returncode = process.wait()
 
-        # Analyze output for silent failures
-        output_text = '\n'.join(output_lines)
-        failure_reason = None
+        # Stream output line by line to Docker logs
+        if process.stdout:
+            for line in process.stdout:
+                # Extract site name if possible for cleaner logs, otherwise generic
+                print(f"[gallery-dl] {line.strip()}", flush=True)
+
+        process.wait()
         
-        # Check for common failure patterns even with exit code 0
-        if returncode == 0:
-            if 'downloaded 0' in output_text.lower() or 'no suitable entries' in output_text.lower():
-                failure_reason = 'no files downloaded'
-            elif '403' in output_text or 'forbidden' in output_text.lower():
-                failure_reason = '403 forbidden'
-            elif '404' in output_text or 'not found' in output_text.lower():
-                failure_reason = '404 not found'
-            elif 'login failed' in output_text.lower() or 'authentication' in output_text.lower():
-                failure_reason = 'login failed'
-            elif 'rate limit' in output_text.lower() or 'too many requests' in output_text.lower():
-                failure_reason = 'rate limited'
-        
-        # Determine final status
-        if returncode != 0:
-            status = 'failed'
-            if not failure_reason:
-                failure_reason = f'exit code {returncode}'
-        elif failure_reason:
-            status = 'failed'
+        # Post-run validation
+        fail_reason = None
+        if process.returncode != 0:
+            fail_reason = f"Exit code {process.returncode}"
         else:
-            status = 'completed'
-        
-        if status == 'failed':
-            print(f"[gallery-dl][{site}] Download failed: {failure_reason}")
+            # Check for silent failures in output or lack of downloads
+            # This is a simplified check; robust parsing might look for specific "downloaded X files" strings
+            # For now, we rely on the user seeing the logs, but we can flag common errors if captured
+            pass
 
-        # Store failure reason in completed_time field (repurposed for error message)
-        completed_value = datetime.now().isoformat() if status == 'completed' else failure_reason
-        
-        execute_db_query(
-            'UPDATE downloads SET status = ?, completed_time = ? WHERE id = ?',
-            (status, completed_value if status == 'failed' else datetime.now().isoformat(), download_id)
-        )
+        db = get_db()
+        if fail_reason:
+            db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
+                       ('failed', datetime.now(), fail_reason, task_id))
+        else:
+            db.execute('UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?',
+                       ('completed', datetime.now(), task_id))
+        db.commit()
 
     except Exception as e:
-        print(f"[gallery-dl][{site}] Exception: {e}")
-        try:
-            execute_db_query(
-                'UPDATE downloads SET status = ?, completed_time = ? WHERE id = ?',
-                ('failed', str(e), download_id)
-            )
-        except:
-            pass
+        db = get_db()
+        db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
+                   ('failed', datetime.now(), str(e), task_id))
+        db.commit()
     finally:
-        close_db_connection()
-
+        # Trigger next task check
+        threading.Thread(target=process_queue).start()
 
 def process_queue():
-    """Start downloads for pending items, one per site, up to concurrency limit."""
-    try:
-        # Check if queue is paused
-        paused = execute_db_query(
-            "SELECT value FROM app_state WHERE key = 'paused'",
-            fetch=True
-        )
-        if paused and paused[0][0] == '1':
-            return
-        
-        # Get sites that are currently active
-        active_rows = execute_db_query(
-            "SELECT DISTINCT site FROM downloads WHERE status = 'active'",
-            fetch=True
-        )
-        active_sites = {row[0] for row in active_rows}
+    global queue_paused
+    if queue_paused:
+        return
 
-        # Calculate available slots
-        slots = settings.get('concurrency', 3) - len(active_sites)
-        if slots <= 0:
-            return
+    db = get_db()
+    # Get pending tasks ordered by created_at (bumped items have newer created_at)
+    tasks = db.execute(
+        "SELECT * FROM tasks WHERE status = 'pending' ORDER BY created_at DESC"
+    ).fetchall()
 
-        # Get pending downloads
-        pending = execute_db_query(
-            "SELECT id, site, url FROM downloads WHERE status = 'pending' ORDER BY added_time ASC",
-            fetch=True
-        )
+    active_count = db.execute(
+        "SELECT COUNT(*) FROM tasks WHERE status = 'active'"
+    ).fetchone()[0]
 
-        # Start downloads for sites that aren't already running
-        started = 0
-        for download_id, site, url in pending:
-            if started >= slots:
-                break
-            if site in active_sites:
-                continue
-            
-            threading.Thread(
-                target=run_gallery_dl,
-                args=(download_id, site, url),
-                daemon=True
-            ).start()
-            active_sites.add(site)
-            started += 1
+    slots_available = app.config['MAX_CONCURRENT'] - active_count
 
-    except Exception as e:
-        print(f"Error in process_queue: {e}")
+    if slots_available > 0 and tasks:
+        for task in tasks[:slots_available]:
+            threading.Thread(target=run_gallery_dl, args=(task['id'], task['url'])).start()
 
-
-# Scheduler
-scheduler = BackgroundScheduler()
-scheduler.add_job(process_queue, 'interval', seconds=5)
-scheduler.add_job(checkpoint_database, 'interval', minutes=15)
-scheduler.start()
-
-
-# Routes
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/add', methods=['POST'])
-def add_urls():
+@app.route('/api/tasks', methods=['GET'])
+def get_tasks():
+    db = get_db()
+    tasks = db.execute(
+        "SELECT * FROM tasks ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, created_at DESC"
+    ).fetchall()
+    return jsonify([dict(row) for row in tasks])
+
+@app.route('/api/tasks', methods=['POST'])
+def add_task():
     data = request.json
-    urls = [u.strip() for u in data.get('urls', '').split('\n') if u.strip()]
+    url = data.get('url')
+    if not url:
+        return jsonify({'error': 'URL required'}), 400
     
-    for url in urls:
-        site = extract_site(url)
-        execute_db_query(
-            'INSERT INTO downloads (url, site, status, added_time) VALUES (?, ?, ?, ?)',
-            (url, site, 'pending', datetime.now().isoformat())
-        )
+    db = get_db()
+    db.execute('INSERT INTO tasks (url) VALUES (?)', (url,))
+    db.commit()
     
-    return jsonify({'success': True, 'added': len(urls)})
+    threading.Thread(target=process_queue).start()
+    return jsonify({'success': True}), 201
 
-@app.route('/status')
-def status():
-    rows = execute_db_query(
-        'SELECT id, url, site, status, added_time, completed_time FROM downloads ORDER BY added_time ASC',
-        fetch=True
-    )
-    downloads = [
-        {
-            'id': r[0],
-            'url': r[1],
-            'site': r[2],
-            'status': r[3],
-            'added_time': r[4],
-            'completed_time': r[5]
-        }
-        for r in rows
-    ]
+@app.route('/api/task/<int:task_id>/restart', methods=['POST'])
+def restart_task(task_id):
+    db = get_db()
+    # CRITICAL FIX: Reset fail_reason to NULL and status to pending
+    db.execute('''
+        UPDATE tasks 
+        SET status = 'pending', 
+            started_at = NULL, 
+            completed_at = NULL, 
+            fail_reason = NULL,
+            created_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+    ''', (task_id,))
+    db.commit()
     
-    # Get paused state
-    paused_row = execute_db_query(
-        "SELECT value FROM app_state WHERE key = 'paused'",
-        fetch=True
-    )
-    is_paused = paused_row and paused_row[0][0] == '1'
-    
-    return jsonify({
-        'downloads': downloads,
-        'concurrency': settings.get('concurrency', 3),
-        'paused': is_paused
-    })
-
-@app.route('/clear-completed', methods=['POST'])
-def clear_completed():
-    execute_db_query('DELETE FROM downloads WHERE status = "completed"')
-    checkpoint_database()
+    threading.Thread(target=process_queue).start()
     return jsonify({'success': True})
 
-@app.route('/clear-all', methods=['POST'])
-def clear_all():
-    execute_db_query('DELETE FROM downloads')
-    checkpoint_database()
+@app.route('/api/task/<int:task_id>/bump', methods=['POST'])
+def bump_task(task_id):
+    db = get_db()
+    # Update created_at to NOW() so it sorts to the top of pending list
+    db.execute('''
+        UPDATE tasks 
+        SET created_at = CURRENT_TIMESTAMP 
+        WHERE id = ? AND status = 'pending'
+    ''', (task_id,))
+    db.commit()
     return jsonify({'success': True})
 
-@app.route('/export-queue', methods=['GET'])
-def export_queue():
-    rows = execute_db_query(
-        'SELECT url, status FROM downloads WHERE status IN ("pending", "failed") ORDER BY added_time ASC',
-        fetch=True
-    )
-    lines = [f"{url}\t{status}" for url, status in rows]
-    return app.response_class(
-        '\n'.join(lines),
-        mimetype='text/plain',
-        headers={'Content-Disposition': 'attachment; filename=queue_export.txt'}
-    )
+@app.route('/api/task/<int:task_id>/delete', methods=['POST'])
+def delete_task(task_id):
+    db = get_db()
+    db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+    db.commit()
+    return jsonify({'success': True})
 
-@app.route('/set-concurrent', methods=['POST'])
-def set_concurrent():
-    data = request.get_json() or {}
-    val = int(data.get('concurrent', settings.get('concurrency', 3)))
-    settings['concurrency'] = val
-    save_settings()
-    return jsonify({'concurrent': settings['concurrency']})
-
-@app.route('/queue/<int:download_id>', methods=['POST'])
-def requeue(download_id):
-    rows = execute_db_query(
-        'SELECT status FROM downloads WHERE id = ?',
-        (download_id,),
-        fetch=True
-    )
-    if not rows or rows[0][0] != 'failed':
-        return jsonify({'error': 'Not a failed task'}), 400
-    
-    execute_db_query(
-        'UPDATE downloads SET status = "pending", completed_time = NULL WHERE id = ?',
-        (download_id,)
-    )
-    return jsonify({'success': True, 'id': download_id})
-
-
-@app.route('/queue/<int:download_id>/bump', methods=['POST'])
-def bump_task(download_id):
-    """Move a task to the top of the queue by updating its timestamp"""
-    execute_db_query(
-        'UPDATE downloads SET added_time = ? WHERE id = ?',
-        (datetime.now().isoformat(), download_id)
-    )
-    return jsonify({'success': True, 'id': download_id})
-
-
-@app.route('/queue/<int:download_id>/delete', methods=['POST'])
-def delete_task(download_id):
-    """Delete a task from the queue"""
-    execute_db_query('DELETE FROM downloads WHERE id = ?', (download_id,))
-    return jsonify({'success': True, 'id': download_id})
-
-
-@app.route('/toggle-pause', methods=['POST'])
+@app.route('/api/settings/pause', methods=['POST'])
 def toggle_pause():
-    """Toggle the paused state of the queue"""
-    current = execute_db_query(
-        "SELECT value FROM app_state WHERE key = 'paused'",
-        fetch=True
-    )
-    is_paused = current and current[0][0] == '1'
-    
-    new_value = '0' if is_paused else '1'
-    execute_db_query(
-        "INSERT OR REPLACE INTO app_state (key, value) VALUES ('paused', ?)",
-        (new_value,)
-    )
-    return jsonify({'paused': not is_paused})
+    global queue_paused
+    queue_paused = not queue_paused
+    return jsonify({'paused': queue_paused})
 
+@app.route('/api/settings/state', methods=['GET'])
+def get_state():
+    return jsonify({'paused': queue_paused})
 
-@app.route('/update-gallery-dl', methods=['POST'])
+@app.route('/api/update-gallery-dl', methods=['POST'])
 def update_gallery_dl():
-    """Update gallery-dl via pip"""
     try:
-        cmd = ['pip', 'install', '--upgrade', 'gallery-dl', '--break-system-packages']
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate(timeout=120)
-        
-        output = stdout.decode('utf-8') + stderr.decode('utf-8')
-        success = process.returncode == 0
-        
-        # Get current version after update
-        version_cmd = ['gallery-dl', '--version']
-        version_process = subprocess.Popen(version_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        version_out, _ = version_process.communicate()
-        version = version_out.decode('utf-8').strip() if version_process.returncode == 0 else 'unknown'
-        
-        return jsonify({
-            'success': success,
-            'output': output,
-            'version': version
-        })
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return jsonify({'success': False, 'output': 'Update timed out', 'version': 'unknown'})
-    except Exception as e:
-        return jsonify({'success': False, 'output': str(e), 'version': 'unknown'})
-
-
-@app.route('/update-yt-dlp', methods=['POST'])
-def update_yt_dlp():
-    """Update yt-dlp via pip"""
-    try:
-        cmd = ['pip', 'install', '--upgrade', 'yt-dlp', '--break-system-packages']
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate(timeout=120)
-        
-        output = stdout.decode('utf-8') + stderr.decode('utf-8')
-        success = process.returncode == 0
-        
-        # Get current version after update
-        version_cmd = ['yt-dlp', '--version']
-        version_process = subprocess.Popen(version_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        version_out, _ = version_process.communicate()
-        version = version_out.decode('utf-8').strip() if version_process.returncode == 0 else 'unknown'
-        
-        return jsonify({
-            'success': success,
-            'output': output,
-            'version': version
-        })
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return jsonify({'success': False, 'output': 'Update timed out', 'version': 'unknown'})
-    except Exception as e:
-        return jsonify({'success': False, 'output': str(e), 'version': 'unknown'})
-
-
-@app.route('/config', methods=['GET'])
-def get_config():
-    """Get current config"""
-    config = load_config()
-    return jsonify(config)
-
-
-@app.route('/config', methods=['POST'])
-def update_config():
-    """Update config"""
-    try:
-        config = request.get_json()
-        if not config:
-            return jsonify({'success': False, 'error': 'No config provided'}), 400
-        
-        if not isinstance(config, dict):
-            return jsonify({'success': False, 'error': 'Config must be a JSON object'}), 400
-        
-        save_config(config)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/versions', methods=['GET'])
-def get_versions():
-    """Get current versions of gallery-dl and yt-dlp"""
-    versions = {}
-    
-    # Get gallery-dl version
-    try:
-        process = subprocess.Popen(['gallery-dl', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, _ = process.communicate(timeout=10)
-        versions['gallery-dl'] = stdout.decode('utf-8').strip() if process.returncode == 0 else 'unknown'
-    except Exception as e:
-        versions['gallery-dl'] = 'unknown'
-    
-    # Get yt-dlp version
-    try:
-        process = subprocess.Popen(['yt-dlp', '--version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, _ = process.communicate(timeout=10)
-        versions['yt-dlp'] = stdout.decode('utf-8').strip() if process.returncode == 0 else 'unknown'
-    except Exception as e:
-        versions['yt-dlp'] = 'unknown'
-    
-    return jsonify(versions)
-
-
-@app.route('/config/sites', methods=['GET'])
-def get_known_sites():
-    """Return list of gallery-dl extractors from gallery-dl itself"""
-    try:
-        process = subprocess.run(
-            ['gallery-dl', '--list-extractors'],
-            capture_output=True,
-            text=True,
-            timeout=30
+        result = subprocess.run(
+            ['pip', 'install', '--upgrade', 'gallery-dl'],
+            capture_output=True, text=True, check=True
         )
-        categories = set()
-        for line in process.stdout.split('\n'):
-            if 'Category:' in line:
-                category = line.split('Category:')[1].split('-')[0].strip()
-                categories.add(category)
-        return jsonify({'sites': sorted(categories)})
-    except Exception as e:
-        print(f"Failed to get extractors: {e}")
-        return jsonify({'sites': ['twitter', 'instagram', 'reddit', 'pixiv']})
+        # Get version
+        ver_result = subprocess.run(['gallery-dl', '--version'], capture_output=True, text=True)
+        version = ver_result.stdout.strip()
+        return jsonify({'success': True, 'version': version})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'success': False, 'error': e.stderr}), 500
 
+@app.route('/api/update-yt-dlp', methods=['POST'])
+def update_yt_dlp():
+    try:
+        result = subprocess.run(
+            ['pip', 'install', '--upgrade', 'yt-dlp'],
+            capture_output=True, text=True, check=True
+        )
+        # Get version
+        ver_result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True)
+        version = ver_result.stdout.strip()
+        return jsonify({'success': True, 'version': version})
+    except subprocess.CalledProcessError as e:
+        return jsonify({'success': False, 'error': e.stderr}), 500
+
+@app.route('/api/versions', methods=['GET'])
+def get_versions():
+    try:
+        gd_ver = subprocess.run(['gallery-dl', '--version'], capture_output=True, text=True).stdout.strip()
+    except:
+        gd_ver = "unknown"
+    
+    try:
+        yt_ver = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True).stdout.strip()
+    except:
+        yt_ver = "unknown"
+        
+    return jsonify({'gallery_dl': gd_ver, 'yt_dlp': yt_ver})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    init_db()
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=process_queue, trigger="interval", seconds=5)
+    scheduler.start()
+    
+    # Force unbuffered output for Docker logs
+    import sys
+    sys.stdout.reconfigure(line_buffering=True)
+    
+    app.run(host='0.0.0.0', port=5000, threaded=True)
