@@ -2,10 +2,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const urlInput = document.getElementById('url-input');
     const addBtn = document.getElementById('add-urls-button');
     const refreshBtn = document.getElementById('refresh-button');
+    const pauseResumeBtn = document.getElementById('pause-resume-button');
     const clearCompletedBtn = document.getElementById('clear-completed-button');
     const clearAllBtn = document.getElementById('clear-all-button');
     const exportBtn = document.getElementById('export-queue-button');
     const queueList = document.getElementById('queue-list');
+    
+    // Queue state
+    let isPaused = false;
     
     // Sidebar elements
     const menuToggle = document.getElementById('menu-toggle');
@@ -16,6 +20,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const openConfigBtn = document.getElementById('open-config-btn');
     const updateGalleryDlBtn = document.getElementById('update-gallery-dl');
     const updateStatus = document.getElementById('update-status');
+    const galleryDlVersion = document.getElementById('gallery-dl-version');
+    const updateYtDlpBtn = document.getElementById('update-yt-dlp');
+    const updateYtStatus = document.getElementById('update-yt-status');
+    const ytDlpVersion = document.getElementById('yt-dlp-version');
     
     // Config modal elements
     const configModal = document.getElementById('config-modal');
@@ -33,6 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load initial state
     loadTasks();
     loadDarkMode();
+    loadVersions();
     
     // Sidebar toggle
     menuToggle.addEventListener('click', () => {
@@ -100,8 +109,9 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(res => res.json())
         .then(data => {
             if (data.success) {
-                updateStatus.textContent = `Updated to ${data.version}`;
+                updateStatus.textContent = 'Updated!';
                 updateStatus.className = 'update-success';
+                galleryDlVersion.textContent = `v${data.version}`;
             } else {
                 updateStatus.textContent = 'Update failed';
                 updateStatus.className = 'update-error';
@@ -112,6 +122,45 @@ document.addEventListener('DOMContentLoaded', () => {
             updateStatus.className = 'update-error';
         });
     });
+    
+    // Update yt-dlp
+    updateYtDlpBtn.addEventListener('click', () => {
+        updateYtStatus.textContent = 'Updating...';
+        updateYtStatus.className = '';
+        
+        fetch('/api/update-yt-dlp', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                updateYtStatus.textContent = 'Updated!';
+                updateYtStatus.className = 'update-success';
+                ytDlpVersion.textContent = `v${data.version}`;
+            } else {
+                updateYtStatus.textContent = 'Update failed';
+                updateYtStatus.className = 'update-error';
+            }
+        })
+        .catch(() => {
+            updateYtStatus.textContent = 'Update failed';
+            updateYtStatus.className = 'update-error';
+        });
+    });
+    
+    function loadVersions() {
+        fetch('/api/versions')
+        .then(res => res.json())
+        .then(versions => {
+            if (versions.gallery_dl && versions.gallery_dl !== 'unknown') {
+                galleryDlVersion.textContent = `v${versions.gallery_dl}`;
+            }
+            if (versions.yt_dlp && versions.yt_dlp !== 'unknown') {
+                ytDlpVersion.textContent = `v${versions.yt_dlp}`;
+            }
+        })
+        .catch(() => {
+            console.log('Could not load versions');
+        });
+    }
     
     // Add URLs button
     addBtn.addEventListener('click', () => {
@@ -137,6 +186,28 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Refresh button
     refreshBtn.addEventListener('click', loadTasks);
+    
+    // Pause/Resume button
+    pauseResumeBtn.addEventListener('click', () => {
+        isPaused = !isPaused;
+        
+        if (isPaused) {
+            pauseResumeBtn.textContent = 'Resume Queue';
+            pauseResumeBtn.classList.remove('warning');
+            pauseResumeBtn.classList.add('success');
+        } else {
+            pauseResumeBtn.textContent = 'Pause Queue';
+            pauseResumeBtn.classList.remove('success');
+            pauseResumeBtn.classList.add('warning');
+        }
+        
+        // Send pause/resume state to backend
+        fetch('/api/pause', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paused: isPaused })
+        });
+    });
     
     // Clear completed button
     clearCompletedBtn.addEventListener('click', () => {
