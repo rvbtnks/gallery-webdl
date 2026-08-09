@@ -1,48 +1,230 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gallery-DL WebUI</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-    <div class="container">
-        <nav class="sidebar" id="sidebar">
-            <button class="toggle-btn" id="toggleSidebar">☰</button>
-            
-            <!-- Settings Header moved right with padding -->
-            <h2 class="settings-header">Settings</h2>
-            
-            <div class="sidebar-content">
-                <div class="update-section">
-                    <button id="updateGalleryDl">Update gallery-dl (<span id="gd-version">...</span>)</button>
-                    <span id="gd-status" class="status-msg"></span>
-                    
-                    <button id="updateYtDlp" style="margin-top: 10px;">Update yt-dlp (<span id="yt-version">...</span>)</button>
-                    <span id="yt-status" class="status-msg"></span>
-                </div>
+:root {
+    --bg-color: #f4f4f9;
+    --text-color: #333;
+    --sidebar-bg: #fff;
+    --card-bg: #fff;
+    --border-color: #ddd;
+    --icon-color: #555;
+    --icon-hover: #333;
+    --delete-color: #dc3545;
+}
 
-                <div class="queue-control">
-                    <button id="pauseBtn">Pause Queue</button>
-                </div>
-            </div>
-        </nav>
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-color: #1a1a1a;
+        --text-color: #e0e0e0;
+        --sidebar-bg: #2d2d2d;
+        --card-bg: #2d2d2d;
+        --border-color: #444;
+        --icon-color: #aaa;
+        --icon-hover: #fff;
+        --delete-color: #ff6b6b;
+    }
+}
 
-        <main class="main-content">
-            <h1>Download Queue</h1>
-            
-            <div class="input-group">
-                <input type="text" id="urlInput" placeholder="Paste URL here...">
-                <button id="addBtn">Add to Queue</button>
-            </div>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    margin: 0;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
 
-            <div class="task-list" id="taskList">
-                <!-- Tasks injected here -->
-            </div>
-        </main>
-    </div>
+.container {
+    display: flex;
+    width: 100%;
+    height: 100%;
+}
 
-    <script src="{{ url_for('static', filename='script.js') }}"></script>
-</body>
-</html>
+/* Sidebar */
+.sidebar {
+    width: 250px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    padding: 20px;
+    position: relative;
+    transition: transform 0.3s ease;
+    display: flex;
+    flex-direction: column;
+}
+
+.toggle-btn {
+    position: absolute;
+    top: 15px;
+    left: 10px;
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--text-color);
+    z-index: 10;
+}
+
+/* Settings Header shifted right to avoid overlap */
+.settings-header {
+    margin-top: 50px;
+    margin-bottom: 20px;
+    font-size: 1.2rem;
+    padding-left: 40px; /* Shifted right ~0.5 inch */
+    color: var(--text-color);
+}
+
+.sidebar-content {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+button {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 10px 15px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background 0.2s;
+}
+
+button:hover {
+    background-color: #0056b3;
+}
+
+#pauseBtn {
+    background-color: #ffc107;
+    color: #333;
+}
+
+#pauseBtn.paused {
+    background-color: #28a745;
+    color: white;
+}
+
+.status-msg {
+    font-size: 0.8rem;
+    margin-top: 5px;
+    display: block;
+    min-height: 1.2em;
+}
+
+/* Main Content */
+.main-content {
+    flex: 1;
+    padding: 30px;
+    overflow-y: auto;
+}
+
+.input-group {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+input[type="text"] {
+    flex: 1;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--card-bg);
+    color: var(--text-color);
+}
+
+/* Task List */
+.task-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.task-item {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    padding: 15px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.task-item:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+.task-info {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-right: 15px;
+}
+
+.task-status {
+    font-weight: bold;
+    margin-right: 15px;
+    min-width: 80px;
+    text-align: right;
+}
+
+.status-pending { color: #ffc107; }
+.status-active { color: #007bff; }
+.status-completed { color: #28a745; }
+.status-failed { color: #dc3545; }
+
+/* Action Icons Column */
+.task-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: 120px;
+}
+
+.action-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    transition: all 0.2s;
+}
+
+.action-btn svg {
+    width: 20px;
+    height: 20px;
+    fill: var(--icon-color);
+}
+
+.action-btn:hover {
+    opacity: 1;
+    transform: scale(1.1);
+}
+
+.action-btn:hover svg {
+    fill: var(--icon-hover);
+}
+
+.delete-btn:hover svg {
+    fill: var(--delete-color);
+}
+
+/* Tooltip */
+.action-btn[title]:hover::after {
+    content: attr(title);
+    position: absolute;
+    bottom: -30px;
+    background: #333;
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    z-index: 100;
+}
