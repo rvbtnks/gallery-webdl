@@ -200,7 +200,19 @@ def delete_task(task_id):
 @app.route('/api/settings/pause', methods=['POST'])
 def toggle_pause():
     global queue_paused
-    queue_paused = not queue_paused
+    data = request.get_json()
+    if data and 'paused' in data:
+        queue_paused = data['paused']
+    else:
+        queue_paused = not queue_paused
+    return jsonify({'paused': queue_paused})
+
+@app.route('/api/pause', methods=['POST'])
+def set_pause():
+    global queue_paused
+    data = request.get_json()
+    if data and 'paused' in data:
+        queue_paused = data['paused']
     return jsonify({'paused': queue_paused})
 
 @app.route('/api/settings/state', methods=['GET'])

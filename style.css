@@ -73,8 +73,8 @@ body {
 #sidebar {
     position: fixed;
     top: 0;
-    left: -300px;
-    width: 300px;
+    left: -260px;
+    width: 260px;
     height: 100%;
     background-color: var(--bg-card);
     box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1);
@@ -155,6 +155,28 @@ body {
     color: var(--danger);
 }
 
+#gallery-dl-version, #yt-dlp-version {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+#update-yt-status {
+    display: block;
+    font-size: 12px;
+    margin-top: 8px;
+    min-height: 16px;
+}
+
+#update-yt-status.update-success {
+    color: var(--success);
+}
+
+#update-yt-status.update-error {
+    color: var(--danger);
+}
+
 main {
     max-width: 1000px;
     margin: 0 auto;
@@ -230,6 +252,10 @@ textarea:focus {
 .warning {
     background-color: var(--warning);
     color: #212529;
+}
+
+.success {
+    background-color: var(--success);
 }
 
 .danger {
@@ -623,4 +649,11 @@ textarea:focus {
     .site-selector {
         flex-direction: column;
     }
+}
+
+/* Button with icons layout */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
 }
