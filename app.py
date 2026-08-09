@@ -50,13 +50,6 @@ def init_db():
                 fail_reason TEXT
             )
         ''')
-        # Ensure paused state table exists
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        ''')
         db.commit()
 
 def run_gallery_dl(task_id, url):
@@ -125,20 +118,57 @@ def process_queue():
 
     # Use direct connection for background scheduler
     db = get_db_connection()
-    # Get pending tasks ordered by created_at (bumped items have newer created_at)
-    tasks = db.execute(
-        "SELECT * FROM tasks WHERE status = 'pending' ORDER BY created_at DESC"
+    
+    # Get active tasks with their URLs to track which sites are currently downloading
+    active_tasks = db.execute(
+        "SELECT id, url FROM tasks WHERE status = 'active'"
     ).fetchall()
-
-    active_count = db.execute(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'active'"
-    ).fetchone()[0]
-
+    
+    # Extract site domains from active task URLs to enforce one download per site
+    def extract_site(url):
+        """Extract the site domain from a URL"""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            # Get the base domain (e.g., 'twitter.com' from 'https://twitter.com/user')
+            netloc = parsed.netloc.lower()
+            # Remove www. prefix if present
+            if netloc.startswith('www.'):
+                netloc = netloc[4:]
+            return netloc
+        except:
+            return url
+    
+    active_sites = set()
+    for task in active_tasks:
+        site = extract_site(task['url'])
+        active_sites.add(site)
+    
+    active_count = len(active_tasks)
+    
+    # Get pending tasks ordered by created_at (bumped items have newer created_at)
+    pending_tasks = db.execute(
+        "SELECT id, url FROM tasks WHERE status = 'pending' ORDER BY created_at DESC"
+    ).fetchall()
+    
     slots_available = app.config['MAX_CONCURRENT'] - active_count
-
-    if slots_available > 0 and tasks:
-        for task in tasks[:slots_available]:
+    
+    if slots_available > 0 and pending_tasks:
+        started = 0
+        for task in pending_tasks:
+            if started >= slots_available:
+                break
+            
+            site = extract_site(task['url'])
+            
+            # Skip if this site is already actively downloading
+            if site in active_sites:
+                continue
+            
+            # Start this task and mark its site as active
             threading.Thread(target=run_gallery_dl, args=(task['id'], task['url'])).start()
+            active_sites.add(site)
+            started += 1
     
     db.close()
 
@@ -222,17 +252,25 @@ def toggle_pause():
         queue_paused = not queue_paused
     return jsonify({'paused': queue_paused})
 
-@app.route('/api/pause', methods=['POST'])
-def set_pause():
-    global queue_paused
-    data = request.get_json()
-    if data and 'paused' in data:
-        queue_paused = data['paused']
-    return jsonify({'paused': queue_paused})
-
 @app.route('/api/settings/state', methods=['GET'])
 def get_state():
     return jsonify({'paused': queue_paused})
+
+@app.route('/api/settings/concurrent', methods=['GET'])
+def get_concurrent():
+    return jsonify({'value': app.config['MAX_CONCURRENT']})
+
+@app.route('/api/settings/concurrent', methods=['POST'])
+def set_concurrent():
+    data = request.get_json()
+    if data and 'value' in data:
+        try:
+            value = int(data['value'])
+            if 1 <= value <= 10:
+                app.config['MAX_CONCURRENT'] = value
+        except (ValueError, TypeError):
+            pass
+    return jsonify({'value': app.config['MAX_CONCURRENT']})
 
 @app.route('/api/update-gallery-dl', methods=['POST'])
 def update_gallery_dl():
