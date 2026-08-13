@@ -34,7 +34,7 @@ docker run -d \
   -v /path/to/config:/app/data \
   -e MAX_CONCURRENT=2 \
   --restart unless-stopped \
-  your-dockerhub-username/gallery-webui:latest
+  cressilisbored/gallery-webui:latest
 ```
 
 Update the volume paths:
