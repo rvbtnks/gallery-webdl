@@ -264,13 +264,23 @@ document.addEventListener('DOMContentLoaded', () => {
         fetch('/api/tasks')
         .then(res => res.json())
         .then(tasks => {
-            const pendingUrls = tasks.filter(t => t.status === 'pending').map(t => t.url).join('\n');
-            const blob = new Blob([pendingUrls], { type: 'text/plain' });
+            // Export all URLs regardless of status
+            const allUrls = tasks.map(t => t.url);
+            
+            if (allUrls.length === 0) {
+                alert('No tasks to export');
+                return;
+            }
+            
+            const content = allUrls.join('\n') + '\n';
+            const blob = new Blob([content], { type: 'text/plain' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
             a.download = 'queue-export.txt';
+            document.body.appendChild(a);
             a.click();
+            document.body.removeChild(a);
             URL.revokeObjectURL(url);
         });
     });
