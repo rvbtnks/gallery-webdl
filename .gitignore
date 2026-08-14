@@ -20,6 +20,18 @@ venv/
 __pycache__/
 .mypy_cache/
 .pytest_cache/
+
+# Build artifacts
+dist/
+build/
+target/
+coverage/
+htmlcov/
+*.out
+
+# System files
+.DS_Store
+Thumbs.db
 dist/
 build/
 target/

@@ -483,9 +483,70 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     function copyUrl(url) {
-        navigator.clipboard.writeText(url).then(() => {
-            // Could show a toast notification here instead of alert
-        });
+        // Try modern Clipboard API first (works in secure contexts)
+        if (navigator.clipboard) {
+            navigator.clipboard.writeText(url).then(() => {
+                showToast('URL copied to clipboard!');
+            }).catch(() => {
+                // Fallback for when Clipboard API fails
+                fallbackCopyUrl(url);
+            });
+        } else {
+            // Fallback for older browsers
+            fallbackCopyUrl(url);
+        }
+    }
+    
+    function fallbackCopyUrl(url) {
+        const textarea = document.createElement('textarea');
+        textarea.value = url;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        try {
+            document.execCommand('copy');
+            showToast('URL copied to clipboard!');
+        } catch (err) {
+            showToast('Failed to copy URL', 'error');
+        }
+        document.body.removeChild(textarea);
+    }
+    
+    function showToast(message, type = 'success') {
+        // Remove existing toast if any
+        const existingToast = document.querySelector('.toast-notification');
+        if (existingToast) {
+            existingToast.remove();
+        }
+        
+        const toast = document.createElement('div');
+        toast.className = `toast-notification ${type}`;
+        toast.textContent = message;
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: ${type === 'error' ? '#dc3545' : '#28a745'};
+            color: white;
+            padding: 12px 24px;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            z-index: 10000;
+            font-size: 14px;
+            animation: slideUp 0.3s ease;
+        `;
+        
+        document.body.appendChild(toast);
+        
+        // Auto-remove after 3 seconds
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 0.3s ease';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
     }
     
     function escapeHtml(text) {
