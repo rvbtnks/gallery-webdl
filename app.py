@@ -66,7 +66,7 @@ def run_gallery_dl(task_id, url):
     cmd = ['gallery-dl', '-v', '--no-part', '-c', app.config['CONFIG_FILE'], url]
     
     try:
-        # Start process with merged stdout/stderr for live logging
+        # Start process with merged stdout/stderr for live logging AND capture for analysis
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -76,11 +76,14 @@ def run_gallery_dl(task_id, url):
             universal_newlines=True
         )
 
-        # Stream output line by line to Docker logs
+        # Capture all output for failure pattern detection while streaming
+        output_lines = []
         if process.stdout:
             for line in process.stdout:
-                # Extract site name if possible for cleaner logs, otherwise generic
-                print(f"[gallery-dl] {line.strip()}", flush=True)
+                stripped = line.strip()
+                output_lines.append(stripped)
+                # Stream to Docker logs
+                print(f"[gallery-dl] {stripped}", flush=True)
 
         process.wait()
         
@@ -89,10 +92,24 @@ def run_gallery_dl(task_id, url):
         if process.returncode != 0:
             fail_reason = f"Exit code {process.returncode}"
         else:
-            # Check for silent failures in output or lack of downloads
-            # This is a simplified check; robust parsing might look for specific "downloaded X files" strings
-            # For now, we rely on the user seeing the logs, but we can flag common errors if captured
-            pass
+            # Check for extraction failures in output even when exit code is 0
+            # gallery-dl often returns 0 even when it fails to extract content
+            full_output = '\n'.join(output_lines)
+            
+            # Failure patterns that indicate extraction failed despite exit code 0
+            failure_patterns = [
+                '[error]',
+                'failed to retrieve',
+                'Could not extract',
+                'No results for',
+                'AttributeError',
+                'Traceback'
+            ]
+            
+            for pattern in failure_patterns:
+                if pattern.lower() in full_output.lower():
+                    fail_reason = f"Extraction failed: {pattern} detected in output"
+                    break
 
         if fail_reason:
             db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
