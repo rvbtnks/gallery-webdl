@@ -129,19 +129,6 @@ Configure gallery-dl options through the built-in configuration editor or by pla
 - **Downloader Settings**: Retries, timeout, rate limits, and download behavior
 - **Site-Specific Settings**: Per-site configuration for custom behavior
 
-## GitHub Actions (CI/CD)
-
-This repository includes a GitHub Actions workflow for automatically building and pushing Docker images to Docker Hub on pushes to the `main` branch.
-
-To enable automatic builds:
-
-1. Go to your repository's **Settings** → **Secrets and variables** → **Actions**
-2. Add the following secrets:
-   - `DOCKERHUB_USERNAME`: Your Docker Hub username
-   - `DOCKERHUB_TOKEN`: Your Docker Hub access token
-
-The workflow will push images tagged as `your-username/gallery-webui:latest`.
-
 ## Troubleshooting
 
 - **Downloads not starting**: Check `docker logs` for errors
