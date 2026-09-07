@@ -51,22 +51,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # Or use pre-built image:
-    # image: your-dockerhub-username/gallery-webui:latest
     container_name: gallery-webui
     ports:
       - "8765:5000"
     volumes:
-      - /path/to/media:/media
-      - /path/to/config:/app/data
+      - ./media:/media
+      - ./config:/app/data
     environment:
       - MAX_CONCURRENT=2
     restart: unless-stopped
 ```
 
 Update the volume paths:
-- `/path/to/media`: Where downloaded files will be stored
-- `/path/to/config`: Where database and configuration files are stored
+- `./media`: Where downloaded files will be stored
+- `./config`: Where database and configuration files are stored
 
 Then run:
 
@@ -85,18 +83,6 @@ docker logs -f gallery-webui
 ```
 
 This shows verbose gallery-dl output including files being downloaded, errors, and completion status.
-
-### Running Without Docker
-
-```bash
-# Install dependencies
-pip install flask apscheduler gallery-dl yt-dlp
-
-# Run the application
-python app.py
-```
-
-Access the web interface at `http://localhost:5000`
 
 ## Usage
 
