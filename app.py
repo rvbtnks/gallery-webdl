@@ -18,16 +18,28 @@ app.config['CONFIG_FILE'] = '/app/data/gallery-dl.json'
 # Global state for pausing
 queue_paused = False
 
+# Thread-safe lock for queue processing to prevent race conditions
+queue_lock = threading.Lock()
+
+# Lock for database write operations to prevent SQLite locking issues
+db_write_lock = threading.Lock()
+
 def get_db():
     if 'db' not in g:
-        g.db = sqlite3.connect(app.config['DATABASE'])
+        g.db = sqlite3.connect(app.config['DATABASE'], timeout=30.0)
         g.db.row_factory = sqlite3.Row
+        # Enable WAL mode for better concurrent access
+        g.db.execute('PRAGMA journal_mode=WAL')
+        g.db.execute('PRAGMA busy_timeout=30000')
     return g.db
 
 def get_db_connection():
     """Create a new database connection for use outside app context"""
-    conn = sqlite3.connect(app.config['DATABASE'])
+    conn = sqlite3.connect(app.config['DATABASE'], timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # Enable WAL mode for better concurrent access
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=30000')
     return conn
 
 @app.teardown_appcontext
@@ -57,9 +69,10 @@ def run_gallery_dl(task_id, url):
     
     # Use direct connection for background thread
     db = get_db_connection()
-    db.execute('UPDATE tasks SET status = ?, started_at = ?, fail_reason = NULL WHERE id = ?',
-               ('active', datetime.now(), task_id))
-    db.commit()
+    with db_write_lock:
+        db.execute('UPDATE tasks SET status = ?, started_at = ?, fail_reason = NULL WHERE id = ?',
+                   ('active', datetime.now(), task_id))
+        db.commit()
 
     # Prepare command with verbose output for live logging
     # Using -o to define output path dynamically based on site could be added here
@@ -111,18 +124,20 @@ def run_gallery_dl(task_id, url):
                     fail_reason = f"Extraction failed: {pattern} detected in output"
                     break
 
-        if fail_reason:
-            db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
-                       ('failed', datetime.now(), fail_reason, task_id))
-        else:
-            db.execute('UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?',
-                       ('completed', datetime.now(), task_id))
-        db.commit()
+        with db_write_lock:
+            if fail_reason:
+                db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
+                           ('failed', datetime.now(), fail_reason, task_id))
+            else:
+                db.execute('UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?',
+                           ('completed', datetime.now(), task_id))
+            db.commit()
 
     except Exception as e:
-        db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
-                   ('failed', datetime.now(), str(e), task_id))
-        db.commit()
+        with db_write_lock:
+            db.execute('UPDATE tasks SET status = ?, completed_at = ?, fail_reason = ? WHERE id = ?',
+                       ('failed', datetime.now(), str(e), task_id))
+            db.commit()
     finally:
         db.close()
         # Trigger next task check
@@ -130,64 +145,73 @@ def run_gallery_dl(task_id, url):
 
 def process_queue():
     global queue_paused
-    if queue_paused:
+    
+    # Use lock to prevent race conditions when multiple threads try to process the queue
+    if not queue_lock.acquire(blocking=False):
+        # Another thread is already processing the queue, skip this run
         return
+    
+    try:
+        if queue_paused:
+            return
 
-    # Use direct connection for background scheduler
-    db = get_db_connection()
-    
-    # Get active tasks with their URLs to track which sites are currently downloading
-    active_tasks = db.execute(
-        "SELECT id, url FROM tasks WHERE status = 'active'"
-    ).fetchall()
-    
-    # Extract site domains from active task URLs to enforce one download per site
-    def extract_site(url):
-        """Extract the site domain from a URL"""
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            # Get the base domain (e.g., 'twitter.com' from 'https://twitter.com/user')
-            netloc = parsed.netloc.lower()
-            # Remove www. prefix if present
-            if netloc.startswith('www.'):
-                netloc = netloc[4:]
-            return netloc
-        except:
-            return url
-    
-    active_sites = set()
-    for task in active_tasks:
-        site = extract_site(task['url'])
-        active_sites.add(site)
-    
-    active_count = len(active_tasks)
-    
-    # Get pending tasks ordered by created_at (bumped items have newer created_at)
-    pending_tasks = db.execute(
-        "SELECT id, url FROM tasks WHERE status = 'pending' ORDER BY created_at DESC"
-    ).fetchall()
-    
-    slots_available = app.config['MAX_CONCURRENT'] - active_count
-    
-    if slots_available > 0 and pending_tasks:
-        started = 0
-        for task in pending_tasks:
-            if started >= slots_available:
-                break
-            
+        # Use direct connection for background scheduler
+        db = get_db_connection()
+        
+        # Get active tasks with their URLs to track which sites are currently downloading
+        active_tasks = db.execute(
+            "SELECT id, url FROM tasks WHERE status = 'active'"
+        ).fetchall()
+        
+        # Extract site domains from active task URLs to enforce one download per site
+        def extract_site(url):
+            """Extract the site domain from a URL"""
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                # Get the base domain (e.g., 'twitter.com' from 'https://twitter.com/user')
+                netloc = parsed.netloc.lower()
+                # Remove www. prefix if present
+                if netloc.startswith('www.'):
+                    netloc = netloc[4:]
+                return netloc
+            except:
+                return url
+        
+        active_sites = set()
+        for task in active_tasks:
             site = extract_site(task['url'])
-            
-            # Skip if this site is already actively downloading
-            if site in active_sites:
-                continue
-            
-            # Start this task and mark its site as active
-            threading.Thread(target=run_gallery_dl, args=(task['id'], task['url'])).start()
             active_sites.add(site)
-            started += 1
-    
-    db.close()
+        
+        active_count = len(active_tasks)
+        
+        # Get pending tasks ordered by created_at (bumped items have newer created_at)
+        pending_tasks = db.execute(
+            "SELECT id, url FROM tasks WHERE status = 'pending' ORDER BY created_at DESC"
+        ).fetchall()
+        
+        slots_available = app.config['MAX_CONCURRENT'] - active_count
+        
+        if slots_available > 0 and pending_tasks:
+            started = 0
+            for task in pending_tasks:
+                if started >= slots_available:
+                    break
+                
+                site = extract_site(task['url'])
+                
+                # Skip if this site is already actively downloading
+                if site in active_sites:
+                    continue
+                
+                # Start this task and mark its site as active
+                threading.Thread(target=run_gallery_dl, args=(task['id'], task['url'])).start()
+                active_sites.add(site)
+                started += 1
+        
+        db.close()
+    finally:
+        queue_lock.release()
 
 @app.route('/')
 def index():
@@ -196,9 +220,10 @@ def index():
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
     db = get_db_connection()
-    tasks = db.execute(
-        "SELECT * FROM tasks ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, created_at DESC"
-    ).fetchall()
+    with db_write_lock:
+        tasks = db.execute(
+            "SELECT * FROM tasks ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, created_at DESC"
+        ).fetchall()
     result = [dict(row) for row in tasks]
     db.close()
     return jsonify(result)
@@ -210,10 +235,11 @@ def add_task():
     if not url:
         return jsonify({'error': 'URL required'}), 400
     
-    db = get_db_connection()
-    db.execute('INSERT INTO tasks (url) VALUES (?)', (url,))
-    db.commit()
-    db.close()
+    with db_write_lock:
+        db = get_db_connection()
+        db.execute('INSERT INTO tasks (url) VALUES (?)', (url,))
+        db.commit()
+        db.close()
     
     threading.Thread(target=process_queue).start()
     return jsonify({'success': True}), 201
@@ -221,42 +247,45 @@ def add_task():
 @app.route('/api/task/<int:task_id>/restart', methods=['POST'])
 def restart_task(task_id):
     # Use direct connection for API endpoint
-    db = get_db_connection()
-    # CRITICAL FIX: Reset fail_reason to NULL and status to pending
-    db.execute('''
-        UPDATE tasks 
-        SET status = 'pending', 
-            started_at = NULL, 
-            completed_at = NULL, 
-            fail_reason = NULL,
-            created_at = CURRENT_TIMESTAMP 
-        WHERE id = ?
-    ''', (task_id,))
-    db.commit()
-    db.close()
+    with db_write_lock:
+        db = get_db_connection()
+        # CRITICAL FIX: Reset fail_reason to NULL and status to pending
+        db.execute('''
+            UPDATE tasks 
+            SET status = 'pending', 
+                started_at = NULL, 
+                completed_at = NULL, 
+                fail_reason = NULL,
+                created_at = CURRENT_TIMESTAMP 
+            WHERE id = ?
+        ''', (task_id,))
+        db.commit()
+        db.close()
     
     threading.Thread(target=process_queue).start()
     return jsonify({'success': True})
 
 @app.route('/api/task/<int:task_id>/bump', methods=['POST'])
 def bump_task(task_id):
-    db = get_db_connection()
-    # Update created_at to NOW() so it sorts to the top of pending list
-    db.execute('''
-        UPDATE tasks 
-        SET created_at = CURRENT_TIMESTAMP 
-        WHERE id = ? AND status = 'pending'
-    ''', (task_id,))
-    db.commit()
-    db.close()
+    with db_write_lock:
+        db = get_db_connection()
+        # Update created_at to NOW() so it sorts to the top of pending list
+        db.execute('''
+            UPDATE tasks 
+            SET created_at = CURRENT_TIMESTAMP 
+            WHERE id = ? AND status = 'pending'
+        ''', (task_id,))
+        db.commit()
+        db.close()
     return jsonify({'success': True})
 
 @app.route('/api/task/<int:task_id>/delete', methods=['POST'])
 def delete_task(task_id):
-    db = get_db_connection()
-    db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-    db.commit()
-    db.close()
+    with db_write_lock:
+        db = get_db_connection()
+        db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+        db.commit()
+        db.close()
     return jsonify({'success': True})
 
 @app.route('/api/settings/pause', methods=['POST'])
@@ -353,8 +382,9 @@ def save_config():
         }
         
         os.makedirs(os.path.dirname(app.config['CONFIG_FILE']), exist_ok=True)
-        with open(app.config['CONFIG_FILE'], 'w') as f:
-            json.dump(config, f, indent=2)
+        with db_write_lock:
+            with open(app.config['CONFIG_FILE'], 'w') as f:
+                json.dump(config, f, indent=2)
         
         return jsonify({'success': True})
     except Exception as e:
