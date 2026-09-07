@@ -14,6 +14,28 @@ app.config['DATABASE'] = '/app/data/gallery_dl.db'
 app.config['MEDIA_DIR'] = '/media'
 app.config['MAX_CONCURRENT'] = int(os.environ.get('MAX_CONCURRENT', 2))
 app.config['CONFIG_FILE'] = '/app/data/gallery-dl.json'
+app.config['STATE_FILE'] = '/app/data/state.json'
+
+def load_state():
+    """Load persisted state from file"""
+    global queue_paused
+    try:
+        if os.path.exists(app.config['STATE_FILE']):
+            with open(app.config['STATE_FILE'], 'r') as f:
+                state = json.load(f)
+                queue_paused = state.get('paused', False)
+    except Exception as e:
+        print(f"Error loading state: {e}")
+        queue_paused = False
+
+def save_state():
+    """Save current state to file for persistence across restarts"""
+    try:
+        os.makedirs(os.path.dirname(app.config['STATE_FILE']), exist_ok=True)
+        with open(app.config['STATE_FILE'], 'w') as f:
+            json.dump({'paused': queue_paused}, f)
+    except Exception as e:
+        print(f"Error saving state: {e}")
 
 # Global state for pausing
 queue_paused = False
@@ -296,6 +318,7 @@ def toggle_pause():
         queue_paused = data['paused']
     else:
         queue_paused = not queue_paused
+    save_state()  # Persist state to file
     return jsonify({'paused': queue_paused})
 
 @app.route('/api/settings/state', methods=['GET'])
@@ -401,6 +424,7 @@ def get_extractors():
 
 if __name__ == '__main__':
     init_db()
+    load_state()  # Load persisted state from file on startup
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=process_queue, trigger="interval", seconds=5)
     scheduler.start()

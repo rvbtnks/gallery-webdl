@@ -65,6 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTasks();
     loadDarkMode();
     loadVersions();
+    loadPauseState();  // Load pause state from backend
     
     // Sidebar toggle
     menuToggle.addEventListener('click', () => {
@@ -213,7 +214,17 @@ document.addEventListener('DOMContentLoaded', () => {
     // Pause/Resume button
     pauseResumeBtn.addEventListener('click', () => {
         isPaused = !isPaused;
+        updatePauseButtonState();
         
+        // Send pause/resume state to backend
+        fetch('/api/settings/pause', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paused: isPaused })
+        });
+    });
+    
+    function updatePauseButtonState() {
         if (isPaused) {
             pauseResumeBtn.textContent = 'Resume Queue';
             pauseResumeBtn.classList.remove('warning');
@@ -223,14 +234,20 @@ document.addEventListener('DOMContentLoaded', () => {
             pauseResumeBtn.classList.remove('success');
             pauseResumeBtn.classList.add('warning');
         }
-        
-        // Send pause/resume state to backend
-        fetch('/api/settings/pause', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paused: isPaused })
-        });
-    });
+    }
+    
+    function loadPauseState() {
+        fetch('/api/settings/state')
+            .then(res => res.json())
+            .then(data => {
+                isPaused = data.paused || false;
+                updatePauseButtonState();
+            })
+            .catch(() => {
+                isPaused = false;
+                updatePauseButtonState();
+            });
+    }
     
     // Clear completed button
     clearCompletedBtn.addEventListener('click', () => {
